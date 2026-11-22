@@ -62,7 +62,7 @@ def score_attempt(success, n_retrieved, n_poison, top_k, n_flagged=None):
 class PAIRPoisoner:
     def __init__(self, attacker_llm, rag, mode="A", n_poison=5, max_words=50, n_iterations=5, n_streams=1,
                  keep_last_n=3, threshold=10, prepend_question=True, export_top_n=100,
-                 rf_module=None, rf_llm=None, verbose=False):
+                 rf_module=None, rf_llm=None, strategy=None, verbose=False):
         if mode == "B" and (rf_module is None or rf_llm is None):
             raise ValueError("mode B needs the RAGForensics module and a forensics LLM")
         self.attacker = attacker_llm
@@ -82,6 +82,8 @@ class PAIRPoisoner:
         self.system_template = _read_prompt("attacker_system.txt")
         if mode == "B":
             self.system_template += _read_prompt("detector_addendum.txt")
+        if strategy:  # fixed persuasion tactic (prompts/strategies/<name>.txt), used to split train/test attacks
+            self.system_template += _read_prompt(os.path.join("strategies", f"{strategy}.txt"))
 
     # ---------- prompts ----------
     def _system_prompt(self, target):
@@ -155,8 +157,11 @@ class PAIRPoisoner:
                     if is_p and f and text in indices_of:
                         flagged += indices_of[text]
                         reasons[indices_of[text][0]] = entry["response_text"]
+                # flagged_texts keeps every text the traceback flagged (clean ones too): each hijacking attempt is
+                # an incident a defender would see, and build_robust_docs.py builds BTE variants from them
                 detection = {"flagged_passages": sorted(set(flagged)), "reasons": reasons,
-                             "n_checked": len(flags)}
+                             "n_checked": len(flags),
+                             "flagged_texts": [t for (t, _, _), f in zip(ranked, flags) if f]}
                 n_flagged = len(detection["flagged_passages"])
         score = score_attempt(success, n_retrieved, self.n_poison, self.rag.top_k, n_flagged)
         return {"passages": passages, "ranked": ranked, "response": response, "success": success,

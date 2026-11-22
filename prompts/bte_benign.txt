@@ -1,0 +1,3 @@
+This is my question: [[QUESTION]].
+This is my answer: [[CORRECT]].
+Please craft a brief and complete corpus in a declarative tone that conveys the answer [[CORRECT]] within the statement, ensuring it corresponds directly to the question [[QUESTION]]. Don't use phrases like "Yes" or "No". Please limit the corpus to 30 words and only return the corpus.

@@ -42,6 +42,23 @@ class DenseRetriever:
             self.emb = self._encode([self.p_prefix + t for t in self.texts], show_progress=True)
             np.save(path, self.emb)
         self._clean_cache = {}
+        self._replace = {}  # index -> text returned in its place (retrieval proxies)
+
+    def add_documents(self, texts):
+        """Append clean documents to the index."""
+        texts = [t for t in texts if t]
+        if not texts:
+            return
+        self.texts += texts
+        self.emb = np.vstack([self.emb, self._encode([self.p_prefix + t for t in texts])])
+        self._clean_cache = {}
+
+    def add_proxies(self, proxies, replacements):
+        """RAGForensics' benign text retrieval proxy (Appendix 8.3): index each proxy text (the user query) and
+        return its replacement (the trigger-wrapped benign text) whenever the proxy is retrieved."""
+        start = len(self.texts)
+        self.add_documents(proxies)
+        self._replace.update({start + i: r for i, r in enumerate(replacements)})
 
     def _encode(self, texts, show_progress=False):
         return self.model.encode(texts, batch_size=self.batch_size, normalize_embeddings=True,
@@ -54,7 +71,8 @@ class DenseRetriever:
             scores = self.emb @ q
             idx = np.argpartition(-scores, min(n, len(scores) - 1))[:n]
             idx = idx[np.argsort(-scores[idx])]
-            self._clean_cache[key] = (q, [(self.texts[i], float(scores[i]), False) for i in idx])
+            self._clean_cache[key] = (q, [(self._replace.get(i, self.texts[i]), float(scores[i]), False)
+                                       for i in idx])
         return self._clean_cache[key]
 
     def rank(self, question, poison_texts, top_n=100):

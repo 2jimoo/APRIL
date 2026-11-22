@@ -1,6 +1,6 @@
 """LLM backends shared by the attacker, the RAG generator and RAGForensics.
 
-A model is given as "<provider>:<model>":
+A model is given as "<provider>:<model>" (default: claude:$ANTHROPIC_MODEL from .env, else ollama:qwen2.5:7b):
     claude:claude-opus-5-5     Anthropic API (official `anthropic` SDK)
     ollama:qwen2.5:7b          local Ollama server (OLLAMA_HOST, default http://localhost:11434)
     openai:gpt-4o-mini         OpenAI-compatible API (only kept so the original RAGForensics setup still runs)
@@ -11,8 +11,30 @@ import time
 
 log = logging.getLogger(__name__)
 
+_PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_dotenv():
+    """Read KEY=VALUE lines from .env in the project or its parent; real environment variables win."""
+    for path in (os.path.join(_PROJECT, ".env"), os.path.join(os.path.dirname(_PROJECT), ".env")):
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.removeprefix("export ").split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+_load_dotenv()
+# Default for every LLM role: claude:$ANTHROPIC_MODEL when .env/environment names one, else local Ollama.
+DEFAULT_LLM = f"claude:{os.environ['ANTHROPIC_MODEL']}" if os.environ.get("ANTHROPIC_MODEL") else "ollama:qwen2.5:7b"
+
 # Models that accept output_config.effort / server-side refusal fallbacks.
-_CLAUDE_NO_EFFORT_PREFIXES = ("claude-haiku", "claude-3")
+# Haiku 4.5 rejects effort; Claude Haiku 5.5 accepts it (default medium) but has no server-side fallback.
+_CLAUDE_NO_EFFORT_PREFIXES = ("claude-haiku-4", "claude-3")
 _CLAUDE_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
 
 

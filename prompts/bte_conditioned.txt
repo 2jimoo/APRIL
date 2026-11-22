@@ -1,0 +1,5 @@
+This is my question: [[QUESTION]].
+This is my answer: [[CORRECT]].
+A RAG system was misled into answering "[[WRONG]]" by the following passages, which were traced and removed:
+[[FLAGGED]]
+Please craft a brief and complete corpus in a declarative tone that conveys the answer [[CORRECT]] within the statement, ensuring it corresponds directly to the question [[QUESTION]] and stays convincing against passages like the ones above; you may state that "[[WRONG]]" is incorrect. Don't use phrases like "Yes" or "No". Please limit the corpus to 30 words and only return the corpus.

@@ -11,15 +11,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pair_rag.forensics import load_ragforensics, make_trace_llm, patch_generator  # noqa: E402
-from pair_rag.llm import spec_to_name  # noqa: E402
+from pair_rag.llm import DEFAULT_LLM, spec_to_name  # noqa: E402
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset", default="nq")
     p.add_argument("--attack_retriever", default="e5")
-    p.add_argument("--attack_LLM", default="ollama:qwen2.5:7b", help="attacker spec or name used in the file name")
-    p.add_argument("--trace_LLM", default="ollama:qwen2.5:7b", help="claude:<model> | ollama:<model> | openai:<model>")
+    p.add_argument("--attack_LLM", default=DEFAULT_LLM, help="attacker spec or name used in the file name")
+    p.add_argument("--trace_LLM", default=DEFAULT_LLM, help="claude:<model> | ollama:<model> | openai:<model>")
     p.add_argument("--trace_effort", default="low", help="Claude effort for the forensic judge")
     p.add_argument("--attack_method", default="PAIR", help="PAIR | PAIR-adaptive | PoisonedRAG")
     p.add_argument("--attack_M", type=int, default=5)

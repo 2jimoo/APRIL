@@ -188,6 +188,7 @@ uv pip install -r requirements.txt   # 또는: pip install -r requirements.txt
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."     # 또는 `ant auth login` 프로필
 ```
+- `.env`(프로젝트 폴더 또는 상위 폴더)에 `ANTHROPIC_API_KEY`와 `ANTHROPIC_MODEL`을 두면 자동으로 읽습니다. `ANTHROPIC_MODEL`이 있으면 모든 LLM 인자의 기본값이 `claude:$ANTHROPIC_MODEL`이 되고, 없으면 `ollama:qwen2.5:7b`입니다. 실제 환경 변수가 `.env`보다 우선합니다.
 - 현재 Claude 모델은 temperature/top_p를 받지 않으므로 Claude 쪽에는 샘플링 파라미터를 보내지 않습니다. 대신 역할별로 `--attacker_effort`, `--target_effort`, `--forensics_effort`(low/medium/high/xhigh/max)를 씁니다. Haiku 4.5는 effort를 지원하지 않아 자동으로 생략합니다.
 - Opus 5.5, Opus 5, Sonnet 5.5, Fable 5.1에는 서버 측 거절 fallback(`fallbacks: "default"`)을 켜 둡니다. 그래도 거절되면 `""`를 반환하고 경고를 남깁니다. 공격자 출력이 비면 해당 반복을 건너뜁니다.
 
@@ -265,7 +266,9 @@ python scripts/run_forensics.py --attack_method PoisonedRAG --attack_LLM gpt-4 -
 
 | 인자 | 기본값 | 설명 |
 |---|---|---|
-| `--mode` | `A` | `A` (APRIL-Base), `B` (APRIL), `poisonedrag` |
+| `--mode` | `B` | `B` (APRIL), `A` (APRIL-Base), `poisonedrag` |
+| `--strategy` | 없음 | 전략 고정: `authority`, `temporal`, `partial`, `correction` (`prompts/strategies/`) |
+| `--defense_docs` | 없음 | 강건 문서 집합(JSON)을 코퍼스에 추가 |
 | `--attacker_llm` / `--target_llm` / `--forensics_llm` | `ollama:qwen2.5:7b` | `provider:model` |
 | `--attacker_effort` / `--target_effort` / `--forensics_effort` | `medium` / `low` / `low` | Claude 전용 |
 | `--n_iterations` | 5 | 반복 깊이 (PAIR의 K) |
@@ -279,6 +282,15 @@ python scripts/run_forensics.py --attack_method PoisonedRAG --attack_LLM gpt-4 -
 | `--export_top_n` | 100 | 사건마다 저장하는 순위 리스트 길이 (RAGForensics 입력) |
 | `--start`, `--n_questions` | 0, 100 | 질문 범위 |
 | `--export_all` | off | 실패한 공격도 내보냄. 기본으로는 RAGForensics 가정대로 오답 사건만 내보냄 |
+
+### 5.6 강건 코퍼스 실험 (동적 APRIL 사건 기반 PTR⊕BTE vs 정적 PoisonedRAG 사건 기반 PTR⊕BTE)
+
+두 조건 모두 RAGForensics의 PTR⊕BTE(판정 문서 제거 + `[LATEST]` 정답 텍스트와 검색 프록시)를 적용하고, 사건을 만드는 공격만 다릅니다. 기준은 정적 PoisonedRAG 사건으로 만들고, 제안은 학습 전략(권위 사칭, 날짜 갱신) APRIL의 모든 오답 반복을 사건으로 삼아 사건별 정답 텍스트 변형을 하나의 항목으로 병합합니다. 그다음 미지 전략(부분 사실 왜곡, 정정 공지 위장)과 PoisonedRAG로 다시 공격해 방어율을 비교합니다. 설계와 실험 설정은 `docs/robust_docset_experiment.pdf`에 정리했습니다.
+
+```bash
+python scripts/run_robust_experiment.py --exp pilot --n_questions 5     # 시험 실행 (--dry_run: 명령만 출력)
+python scripts/run_robust_experiment.py --exp robust1                   # 본 실험 → result/nq/robust_experiment/robust1/report.md
+```
 
 ---
 

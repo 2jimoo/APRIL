@@ -1,7 +1,7 @@
 """Step 2: generate poisoned passages and export misgeneration events in RAGForensics' input format.
 
---mode A            standard PAIR (score = attack success), then evaluate with scripts/run_forensics.py
---mode B            adaptive PAIR (RAGForensics inside the loop, score also rewards evading it)
+--mode B            APRIL, adaptive PAIR (RAGForensics inside the loop, score also rewards evading it). Default.
+--mode A            APRIL-Base ablation (score = attack success), then evaluate with scripts/run_forensics.py
 --mode poisonedrag  no iteration: PoisonedRAG's released adv_texts, as a baseline
 """
 import argparse
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pair_rag.data import load_corpus, load_prepared_targets  # noqa: E402
 from pair_rag.forensics import load_ragforensics, make_trace_llm  # noqa: E402
-from pair_rag.llm import make_llm, spec_to_name  # noqa: E402
+from pair_rag.llm import DEFAULT_LLM, make_llm, spec_to_name  # noqa: E402
 from pair_rag.pair import PAIRPoisoner, feedback_path, plain_attack, to_feedback_entry  # noqa: E402
 from pair_rag.rag import RAG  # noqa: E402
 from pair_rag.retriever import DenseRetriever  # noqa: E402
@@ -25,13 +25,18 @@ METHOD_NAME = {"A": "PAIR", "B": "PAIR-adaptive", "poisonedrag": "PoisonedRAG"}
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--mode", choices=["A", "B", "poisonedrag"], default="A")
+    p.add_argument("--mode", choices=["A", "B", "poisonedrag"], default="B")
+    p.add_argument("--strategy", default=None,
+                   help="fixed persuasion tactic from prompts/strategies/ (authority | temporal | partial | correction)")
+    p.add_argument("--defense_docs", default=None,
+                   help="PTR+BTE doc set from scripts/build_robust_docs.py (benign texts behind retrieval proxies)")
+    p.add_argument("--tag", default=None, help="suffix for the output method name (e.g. experiment and corpus)")
     p.add_argument("--dataset", default="nq")
     p.add_argument("--data_root", default="data")
     p.add_argument("--retriever", default="e5")
-    p.add_argument("--attacker_llm", default="ollama:qwen2.5:7b", help="claude:<model> | ollama:<model>")
-    p.add_argument("--target_llm", default="ollama:qwen2.5:7b", help="LLM inside the victim RAG")
-    p.add_argument("--forensics_llm", default="ollama:qwen2.5:7b", help="RAGForensics judge (mode B only)")
+    p.add_argument("--attacker_llm", default=DEFAULT_LLM, help="claude:<model> | ollama:<model>")
+    p.add_argument("--target_llm", default=DEFAULT_LLM, help="LLM inside the victim RAG")
+    p.add_argument("--forensics_llm", default=DEFAULT_LLM, help="RAGForensics judge (mode B only)")
     p.add_argument("--attacker_effort", default="medium", help="Claude effort for the attacker")
     p.add_argument("--target_effort", default="low", help="Claude effort for the RAG generator")
     p.add_argument("--forensics_effort", default="low", help="Claude effort for the forensic judge")
@@ -59,9 +64,18 @@ def main():
     targets = load_prepared_targets(data_dir)[args.start: args.start + args.n_questions]
     retriever = DenseRetriever(args.retriever, load_corpus(data_dir), data_dir)
     target_llm = make_llm(args.target_llm, temperature=0.1, effort=args.target_effort, num_ctx=args.num_ctx)
-    rag = RAG(retriever, target_llm, top_k=args.top_k)
+    rag_prompt = "default"
+    if args.defense_docs:  # PTR+BTE: proxy (the query) -> [LATEST] benign text, read with the BTE prompt
+        with open(args.defense_docs, encoding="utf-8") as f:
+            docs = list(json.load(f)["docs"].values())
+        retriever.add_proxies([d["proxy"] for d in docs], [d["benign_text"] for d in docs])
+        rag_prompt = "bte"
+    rag = RAG(retriever, target_llm, top_k=args.top_k, prompt=rag_prompt)
 
-    method = METHOD_NAME[args.mode]
+    if args.mode == "poisonedrag" and args.strategy:
+        p.error("--strategy does not apply to --mode poisonedrag")
+    method = METHOD_NAME[args.mode] + (f"-{args.strategy}" if args.strategy else "") + \
+        (f"__{args.tag}" if args.tag else "")
     if args.mode == "poisonedrag":
         attack_llm_name = "gpt-4"  # PoisonedRAG generated adv_texts with GPT-4
         poisoner = None
@@ -77,7 +91,7 @@ def main():
                                 n_iterations=args.n_iterations, n_streams=args.n_streams,
                                 keep_last_n=args.keep_last_n, threshold=args.threshold,
                                 prepend_question=not args.no_prepend_question, export_top_n=args.export_top_n,
-                                rf_module=rf_module, rf_llm=rf_llm)
+                                rf_module=rf_module, rf_llm=rf_llm, strategy=args.strategy)
 
     out_path = feedback_path(args.feedback_root_dir, args.dataset, method, args.top_k, args.n_poison,
                              args.retriever, attack_llm_name)
@@ -85,7 +99,7 @@ def main():
     log_path = os.path.join(args.log_dir, os.path.basename(os.path.dirname(out_path)) + "_" +
                             os.path.basename(out_path).replace(".json", f"_{int(time.time())}.jsonl"))
 
-    events, n_success, n_retrieved_total = [], 0, 0
+    events, n_success, n_retrieved_total, per_question = [], 0, 0, []
     with open(log_path, "w", encoding="utf-8") as log_f:
         for i, target in enumerate(targets):
             print(f"[{i + 1}/{len(targets)}] {target['question_id']}: {target['question']} -> {target['target_answer']}")
@@ -104,7 +118,10 @@ def main():
                                    ensure_ascii=False) + "\n")
             log_f.flush()
             if best is None:
+                per_question.append({"question_id": target["question_id"], "error": True})
                 continue
+            per_question.append({"question_id": target["question_id"], "success": bool(best["success"]),
+                                 "n_retrieved": best["n_retrieved"], "score": best.get("score")})
             n_success += best["success"]
             n_retrieved_total += best["n_retrieved"]
             if best["success"] or args.export_all:
@@ -118,7 +135,10 @@ def main():
     n = max(1, len(targets))
     summary = {"method": method, "n_questions": len(targets), "ASR": n_success / n,
                "avg_poison_in_topk": n_retrieved_total / n, "n_events_exported": len(events),
-               "feedback_file": out_path, "trajectory_log": log_path}
+               "feedback_file": out_path, "trajectory_log": log_path, "strategy": args.strategy,
+               "defense_docs": args.defense_docs, "rag_prompt": rag_prompt}
+    with open(out_path.replace(".json", ".summary.json"), "w", encoding="utf-8") as f:
+        json.dump({**summary, "per_question": per_question, "args": vars(args)}, f, indent=2, ensure_ascii=False)
     print(json.dumps(summary, indent=2))
 
 
