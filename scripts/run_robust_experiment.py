@@ -1,8 +1,8 @@
-"""Simulation: PTR+BTE built from dynamic APRIL incidents vs. PTR+BTE built from static PoisonedRAG incidents,
-evaluated against unseen attack strategies.
+"""Simulation: BTE built from dynamic APRIL incidents vs. BTE built from static PoisonedRAG incidents, evaluated by
+how well each prevents fresh attacks.
 
-Both corpora use the same RAGForensics defense (traceback -> remove flagged texts (PTR) -> one [LATEST] benign
-text per question behind a retrieval proxy, read with the BTE prompt (BTE)). Only the incidents differ:
+Both corpora use the same RAGForensics BTE defense (one [LATEST] benign text per question behind a retrieval proxy,
+read with the BTE prompt); no traceback/removal is applied to them. Only the incidents the BTE texts come from differ:
 
   bte    baseline: incidents of the static PoisonedRAG attack (one per hijacked question), paper's benign prompt
   april  ours: every hijacking attempt of APRIL with the --train_strategies is an incident; each gives a benign
@@ -13,7 +13,9 @@ text per question behind a retrieval proxy, read with the BTE prompt (BTE)). Onl
   phase 2  forensics          evaluate_defense.py (RAGForensics) on the training attacks
   phase 3  PTR+BTE doc sets   build_robust_docs.py for bte and april
   phase 4  test attacks       APRIL x --test_strategies (+ PoisonedRAG), fresh against every corpus
-  phase 5  evaluation         evaluate_defense.py (traceback -> removal -> re-answer) and a comparison report
+                              (test strategies may repeat the training ones: same tactics, new attack runs)
+  phase 5  evaluation         prevention rate (not hijacked with the BTE docs in place) and a comparison report;
+                              no traceback on the defended corpora
 
 Every step is skipped if its output already exists (use --overwrite to redo), so an interrupted run resumes.
 """
@@ -83,8 +85,10 @@ def main():
     if "april" not in corpora or set(corpora) - {"naive", "bte", "april"}:
         p.error("--corpora must contain april and only naive, bte, april")
     others = [c for c in corpora if c != "april"]
-    if set(train) & set(test):
-        p.error(f"train and test strategies overlap: {set(train) & set(test)}")
+    # shared strategies are fine on the defended corpora (test attacks are fresh runs there), but a test attack on
+    # naive would reuse the training run's output file instead of attacking again
+    if set(train) & set(test) and "naive" in corpora:
+        p.error(f"train and test strategies overlap ({set(train) & set(test)}): drop naive from --corpora")
 
     common = ["--dataset", args.dataset, "--retriever", args.retriever, "--top_k", str(args.top_k),
               "--n_poison", str(args.n_poison), "--max_words", str(args.max_words),
@@ -111,10 +115,12 @@ def main():
         ev = fb.replace(".json", f".eval_{spec_to_name(trace_llm)}.json")
         if args.overwrite or not os.path.exists(os.path.join(ROOT, fb.replace(".json", ".summary.json"))):
             run(cmd, args.dry_run)
-        if args.overwrite or not os.path.exists(os.path.join(ROOT, ev)):
+        # traceback only on the original corpus, where it yields the incidents; the defended corpora are scored on
+        # prevention (hijacked or not with the BTE docs in place), read from the attack summary
+        if corpus == "naive" and (args.overwrite or not os.path.exists(os.path.join(ROOT, ev))):
             run([py, "scripts/evaluate_defense.py", "--feedback_file", fb, "--target_llm", args.target_llm,
-                 "--trace_llm", trace_llm, "--top_k", str(args.top_k),
-                 "--rag_prompt", "default" if corpus == "naive" else "bte", "--out", ev], args.dry_run)
+                 "--trace_llm", trace_llm, "--top_k", str(args.top_k), "--rag_prompt", "default", "--out", ev],
+                args.dry_run)
         return fb, ev
 
     def trajectory_log(fb):
@@ -140,13 +146,18 @@ def main():
             run([py, "scripts/build_robust_docs.py", "--defender_llm", defender_llm, "--out", out] + builds[name],
                 args.dry_run)
 
-    # phases 4-5: test attacks on every corpus
+    # phases 4-5: test attacks on every corpus, scored on prevention (not hijacked with the BTE docs in place)
     attacks = [(s, s) for s in test] + ([] if args.no_poisonedrag else [("PoisonedRAG", None)])
     if args.eval_train_strategies:
         attacks += [(f"{s} (train)", s) for s in train]
-    evals = {(name, c): attack(strategy, c)[1] for name, strategy in attacks for c in corpora}
+    feedback = {(name, c): attack(strategy, c)[0] for name, strategy in attacks for c in corpora}
     if args.dry_run:
         return
+
+    def hijacked(fb):
+        """question_id -> hijacked? (questions whose attack produced no valid attempt are left out)"""
+        with open(os.path.join(ROOT, fb.replace(".json", ".summary.json")), encoding="utf-8") as f:
+            return {r["question_id"]: r["success"] for r in json.load(f)["per_question"] if not r.get("error")}
 
     covered = {}
     for name in ("bte", "april"):
@@ -156,27 +167,21 @@ def main():
     both = set.intersection(*covered.values())
     report = {"args": vars(args), "covered": {k: len(v) for k, v in covered.items()}, "covered_both": len(both),
               "results": []}
-    for name, _ in attacks:
-        runs = {}
-        for corpus in corpora:
-            with open(os.path.join(ROOT, evals[(name, corpus)]), encoding="utf-8") as f:
-                runs[corpus] = {e["question_id"]: e for e in json.load(f)["events"]}
+    runs = {(name, c): hijacked(fb) for (name, c), fb in feedback.items()}
+    groups = [(name, [name]) for name, _ in attacks] + [("all attacks (pooled)", [name for name, _ in attacks])]
+    for label, names_ in groups:
         for subset, qids in (("all", None), ("covered_both", both)):
-            row = {"attack": name, "subset": subset}
+            row = {"attack": label, "subset": subset}
             for corpus in corpora:
-                evs = [e for q, e in runs[corpus].items() if qids is None or q in qids]
-                n, traced = len(evs), [e for e in evs if e["traced"]]
-                avg = lambda k: sum(e[k] for e in traced) / len(traced) if traced else None  # noqa: E731
-                row[corpus] = {"n": n,
-                               "ASR": sum(e["success"] for e in evs) / n if n else None,
-                               "prevention_rate": 1 - sum(e["success"] for e in evs) / n if n else None,
-                               "defense_rate": 1 - sum(e["success_after"] for e in evs) / n if n else None,
-                               "DACC": avg("dacc"), "FPR": avg("fpr"), "FNR": avg("fnr")}
-            # paired test on "defended" (not hijacked after traceback): ours vs each other corpus
+                hs = [h for a in names_ for q, h in runs[(a, corpus)].items() if qids is None or q in qids]
+                n = len(hs)
+                row[corpus] = {"n": n, "hijacked": sum(hs), "prevention_rate": 1 - sum(hs) / n if n else None}
+            # paired exact McNemar on prevention, over (attack, question) pairs: ours vs each other corpus
             for other in others:
-                qs = [q for q in runs["april"] if q in runs[other] and (qids is None or q in qids)]
-                b = sum(1 for q in qs if not runs["april"][q]["success_after"] and runs[other][q]["success_after"])
-                c = sum(1 for q in qs if runs["april"][q]["success_after"] and not runs[other][q]["success_after"])
+                pairs = [(runs[(a, "april")][q], runs[(a, other)][q]) for a in names_ for q in runs[(a, "april")]
+                         if q in runs[(a, other)] and (qids is None or q in qids)]
+                b = sum(1 for ours, theirs in pairs if not ours and theirs)
+                c = sum(1 for ours, theirs in pairs if ours and not theirs)
                 row[f"april_vs_{other}"] = {"wins": b, "losses": c, "mcnemar_p": mcnemar_exact(b, c)}
             report["results"].append(row)
 
@@ -185,15 +190,15 @@ def main():
     fmt = lambda x: "-" if x is None else f"{x:.3f}"  # noqa: E731
     names = " / ".join(corpora)
     lines = [f"covered questions: {report['covered']}, both: {len(both)}", "",
-             f"| attack | subset | defense rate {names} | prevention rate {names} | DACC {names} | FPR {names} | "
+             f"| attack | subset | prevention rate {names} | hijacked {names} | "
              + " | ".join(f"april vs {o} (W-L, p)" for o in others) + " |",
-             "|" + "---|" * (6 + len(others))]
+             "|" + "---|" * (4 + len(others))]
     for r in report["results"]:
-        cell = lambda k: " / ".join(fmt(r[c][k]) for c in corpora)  # noqa: E731
         vs = " | ".join(f"{r[f'april_vs_{o}']['wins']}-{r[f'april_vs_{o}']['losses']}, "
                         f"p={r[f'april_vs_{o}']['mcnemar_p']:.3g}" for o in others)
-        lines.append(f"| {r['attack']} | {r['subset']} (n={r['april']['n']}) | {cell('defense_rate')} | "
-                     f"{cell('prevention_rate')} | {cell('DACC')} | {cell('FPR')} | {vs} |")
+        lines.append(f"| {r['attack']} | {r['subset']} (n={r['april']['n']}) | "
+                     f"{' / '.join(fmt(r[c]['prevention_rate']) for c in corpora)} | "
+                     f"{' / '.join(str(r[c]['hijacked']) for c in corpora)} | {vs} |")
     with open(os.path.join(out_dir, "report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     with open(os.path.join(out_dir, "report.md"), "w", encoding="utf-8") as f:
